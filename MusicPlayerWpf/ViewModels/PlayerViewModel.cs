@@ -106,7 +106,15 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
     private async Task LoadMetadataAsync(SongItem song, CancellationToken ct)
     {
         var query = SongQueryParser.BuildQueryFromFileName(song.FileNameWithoutExt);
-        var result = await _api.SearchAsync(query, ct);
+        SongMetadataResult result;
+        try
+        {
+            result = await _api.SearchAsync(query, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
 
         if (ct.IsCancellationRequested)
             return;
@@ -117,6 +125,8 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         if (!result.Success)
         {
             TrackName = song.FileNameWithoutExt;
+            ArtistName = "";
+            AlbumName = "";
             DisplayFileName = song.FileNameWithoutExt;
             DisplayFilePath = song.FullPath;
             ArtworkUrl = DefaultCoverRelativePath;
