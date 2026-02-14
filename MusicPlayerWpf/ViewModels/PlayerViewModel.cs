@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows.Input;
+using System.Windows.Threading;
 using MusicPlayerWpf.Models;
 using MusicPlayerWpf.Services;
 
@@ -14,24 +15,42 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
     private readonly IApiMusicMetadataService _api;
     private readonly IMetadataCache _cache;
     private readonly IAudioPlaybackService _audioPlayback;
+    private readonly IEditWindowService _editWindowService;
     private readonly RelayCommand _playCommand;
+    private readonly RelayCommand _editCommand;
+    private readonly DispatcherTimer _imageTimer;
+    private readonly List<string> _loopImages = new();
+    private int _loopIndex;
+    private string? _nowPlayingPath;
     private CancellationTokenSource? _metadataCts;
     private CancellationTokenSource? _selectionCts;
 
     public PlayerViewModel()
-        : this(new ItunesMetadataService(), new JsonMetadataCacheService(), new WpfAudioPlaybackService())
+        : this(
+            new ItunesMetadataService(),
+            new JsonMetadataCacheService(),
+            new WpfAudioPlaybackService(),
+            new WpfEditWindowService(new WpfFileDialogService(), new ImageStorageService()))
     {
         // Demo songs: replace with your real local files.
         Songs.Add(new SongItem { FullPath = @"C:\Music\Artist - Song.mp3" });
         Songs.Add(new SongItem { FullPath = @"C:\Music\AnotherSong.mp3" });
     }
 
-    public PlayerViewModel(IApiMusicMetadataService api, IMetadataCache cache, IAudioPlaybackService audioPlayback)
+    public PlayerViewModel(
+        IApiMusicMetadataService api,
+        IMetadataCache cache,
+        IAudioPlaybackService audioPlayback,
+        IEditWindowService editWindowService)
     {
         _api = api;
         _cache = cache;
         _audioPlayback = audioPlayback;
+        _editWindowService = editWindowService;
         _playCommand = new RelayCommand(_ => _ = PlaySelectedAsync(), _ => SelectedSong != null);
+        _editCommand = new RelayCommand(_ => _ = OpenEditWindowAsync(), _ => SelectedSong != null);
+        _imageTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+        _imageTimer.Tick += OnImageTimerTick;
         CurrentCoverImagePath = ResolveImagePath(DefaultCoverRelativePath);
     }
 
@@ -46,6 +65,9 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
             _selectedSong = value;
             OnPropertyChanged();
             _playCommand.RaiseCanExecuteChanged();
+            _editCommand.RaiseCanExecuteChanged();
+
+            StopImageLoop();
 
             if (value == null)
                 return;
@@ -74,6 +96,7 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
     public string StatusMessage { get; private set; } = "";
 
     public ICommand PlayCommand => _playCommand;
+    public ICommand EditCommand => _editCommand;
 
     public async Task PlaySelectedAsync()
     {
@@ -92,6 +115,9 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(StatusMessage));
             return;
         }
+
+        _nowPlayingPath = song.FullPath;
+        StopImageLoop();
 
         _metadataCts?.Cancel();
         _metadataCts?.Dispose();
@@ -113,21 +139,15 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
 
         if (cached != null)
         {
-            ApplyCachedMetadata(song, cached, "Loaded from cache");
+            ApplyCachedMetadata(song, cached, "Loaded from cache", isPlayback: true);
             return;
         }
 
-        TrackName = song.FileNameWithoutExt;
-        ArtistName = "";
-        AlbumName = "";
-        ArtworkUrl = DefaultCoverRelativePath;
-        CurrentCoverImagePath = ResolveImagePath(ArtworkUrl);
-        StatusMessage = "Loading metadata...";
-        NotifyMetadataChanged();
+        ApplyFallbackMetadata(song, "Loading metadata...");
 
         try
         {
-            await LoadMetadataFromApiAsync(song, ct);
+            await LoadMetadataFromApiAsync(song, ct, isPlayback: true);
         }
         catch (OperationCanceledException)
         {
@@ -136,6 +156,34 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         catch (Exception ex)
         {
             StatusMessage = $"Metadata error: {ex.Message}";
+            OnPropertyChanged(nameof(StatusMessage));
+        }
+    }
+
+    private async Task OpenEditWindowAsync()
+    {
+        if (SelectedSong == null)
+            return;
+
+        var song = SelectedSong;
+        _editWindowService.ShowEditSongWindow(song, _cache);
+        await RefreshAfterEditAsync(song);
+    }
+
+    private async Task RefreshAfterEditAsync(SongItem song)
+    {
+        try
+        {
+            var cached = await _cache.GetAsync(song.FullPath, CancellationToken.None);
+            if (cached == null)
+                return;
+
+            var isPlayback = _nowPlayingPath == song.FullPath;
+            ApplyCachedMetadata(song, cached, "Updated", isPlayback);
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Cache error: {ex.Message}";
             OnPropertyChanged(nameof(StatusMessage));
         }
     }
@@ -153,7 +201,7 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
             if (cached == null || ct.IsCancellationRequested || SelectedSong?.FullPath != song.FullPath)
                 return;
 
-            ApplyCachedMetadata(song, cached, "Loaded from cache");
+            ApplyCachedMetadata(song, cached, "Loaded from cache", isPlayback: false);
         }
         catch (OperationCanceledException)
         {
@@ -161,7 +209,7 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         }
     }
 
-    private async Task LoadMetadataFromApiAsync(SongItem song, CancellationToken ct)
+    private async Task LoadMetadataFromApiAsync(SongItem song, CancellationToken ct, bool isPlayback)
     {
         var query = SongQueryParser.BuildQueryFromFileName(song.FileNameWithoutExt);
         SongMetadataResult result;
@@ -182,15 +230,7 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
 
         if (!result.Success)
         {
-            TrackName = song.FileNameWithoutExt;
-            ArtistName = "";
-            AlbumName = "";
-            DisplayFileName = song.FileNameWithoutExt;
-            DisplayFilePath = song.FullPath;
-            ArtworkUrl = DefaultCoverRelativePath;
-            CurrentCoverImagePath = ResolveImagePath(ArtworkUrl);
-            StatusMessage = $"API error: {result.ErrorMessage}";
-            NotifyMetadataChanged();
+            ApplyFallbackMetadata(song, $"API error: {result.ErrorMessage}");
             return;
         }
 
@@ -209,20 +249,85 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         if (ct.IsCancellationRequested || SelectedSong?.FullPath != song.FullPath)
             return;
 
-        ApplyCachedMetadata(song, entry, "OK");
+        ApplyCachedMetadata(song, entry, "OK", isPlayback);
     }
 
-    private void ApplyCachedMetadata(SongItem song, SongCacheEntry entry, string status)
+    private void ApplyCachedMetadata(SongItem song, SongCacheEntry entry, string status, bool isPlayback)
     {
         DisplayFileName = song.FileNameWithoutExt;
         DisplayFilePath = song.FullPath;
         TrackName = string.IsNullOrWhiteSpace(entry.TrackName) ? song.FileNameWithoutExt : entry.TrackName;
         ArtistName = entry.ArtistName ?? "";
         AlbumName = entry.AlbumName ?? "";
-        ArtworkUrl = string.IsNullOrWhiteSpace(entry.ApiArtworkUrl) ? DefaultCoverRelativePath : entry.ApiArtworkUrl;
-        CurrentCoverImagePath = ResolveImagePath(ArtworkUrl);
+
+        var apiArtwork = string.IsNullOrWhiteSpace(entry.ApiArtworkUrl)
+            ? DefaultCoverRelativePath
+            : entry.ApiArtworkUrl;
+        ArtworkUrl = apiArtwork;
+
+        var userImages = GetValidUserImages(entry);
+        if (isPlayback && userImages.Count > 0)
+        {
+            StartImageLoop(userImages);
+            CurrentCoverImagePath = ResolveImagePath(userImages[0]);
+        }
+        else
+        {
+            StopImageLoop();
+            CurrentCoverImagePath = ResolveImagePath(userImages.Count > 0 ? userImages[0] : apiArtwork);
+        }
+
         StatusMessage = status;
         NotifyMetadataChanged();
+    }
+
+    private void ApplyFallbackMetadata(SongItem song, string status)
+    {
+        DisplayFileName = song.FileNameWithoutExt;
+        DisplayFilePath = song.FullPath;
+        TrackName = song.FileNameWithoutExt;
+        ArtistName = "";
+        AlbumName = "";
+        ArtworkUrl = DefaultCoverRelativePath;
+        CurrentCoverImagePath = ResolveImagePath(ArtworkUrl);
+        StatusMessage = status;
+        StopImageLoop();
+        NotifyMetadataChanged();
+    }
+
+    private static List<string> GetValidUserImages(SongCacheEntry entry)
+    {
+        return entry.UserImages
+            .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
+            .ToList();
+    }
+
+    private void StartImageLoop(List<string> images)
+    {
+        _loopImages.Clear();
+        _loopImages.AddRange(images);
+        _loopIndex = 0;
+
+        _imageTimer.Stop();
+        if (_loopImages.Count > 1)
+            _imageTimer.Start();
+    }
+
+    private void StopImageLoop()
+    {
+        _imageTimer.Stop();
+        _loopImages.Clear();
+        _loopIndex = 0;
+    }
+
+    private void OnImageTimerTick(object? sender, EventArgs e)
+    {
+        if (_loopImages.Count == 0)
+            return;
+
+        _loopIndex = (_loopIndex + 1) % _loopImages.Count;
+        CurrentCoverImagePath = ResolveImagePath(_loopImages[_loopIndex]);
+        OnPropertyChanged(nameof(CurrentCoverImagePath));
     }
 
     private static string ResolveImagePath(string value)
