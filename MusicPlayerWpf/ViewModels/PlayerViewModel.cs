@@ -135,7 +135,7 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            StatusMessage = $"Cache error: {ex.Message}";
+            StatusMessage = $"Metadata error: {ex.Message}";
             OnPropertyChanged(nameof(StatusMessage));
         }
     }
@@ -214,6 +214,8 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
 
     private void ApplyCachedMetadata(SongItem song, SongCacheEntry entry, string status)
     {
+        DisplayFileName = song.FileNameWithoutExt;
+        DisplayFilePath = song.FullPath;
         TrackName = string.IsNullOrWhiteSpace(entry.TrackName) ? song.FileNameWithoutExt : entry.TrackName;
         ArtistName = entry.ArtistName ?? "";
         AlbumName = entry.AlbumName ?? "";
