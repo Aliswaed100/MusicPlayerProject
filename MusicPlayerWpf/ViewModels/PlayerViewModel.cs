@@ -50,7 +50,7 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
     public string TrackName { get; set; } = "";
     public string ArtistName { get; set; } = "";
     public string AlbumName { get; set; } = "";
-    public string ArtworkUrl { get; set; } = "pack://application:,,,/Assets/default_cover.png";
+    public string ArtworkUrl { get; set; } = "Assets/default_cover.png";
     public string StatusMessage { get; set; } = "";
 
     public ICommand PlayCommand => _playCommand;
@@ -71,7 +71,7 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         TrackName = SelectedSong.FileNameWithoutExt;
         ArtistName = "";
         AlbumName = "";
-        ArtworkUrl = "pack://application:,,,/Assets/default_cover.png";
+        ArtworkUrl = "Assets/default_cover.png";
         StatusMessage = "Loading...";
         NotifyMetadataChanged();
 
@@ -100,7 +100,7 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         TrackName = result.TrackName ?? song.FileNameWithoutExt;
         ArtistName = result.ArtistName ?? "";
         AlbumName = result.AlbumName ?? "";
-        ArtworkUrl = result.ArtworkUrl ?? "pack://application:,,,/Assets/default_cover.png";
+        ArtworkUrl = result.ArtworkUrl ?? "Assets/default_cover.png";
         StatusMessage = "OK";
         NotifyMetadataChanged();
     }
