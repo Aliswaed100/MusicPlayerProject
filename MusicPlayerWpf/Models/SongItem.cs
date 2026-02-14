@@ -1,7 +1,6 @@
 namespace MusicPlayerWpf.Models;
-
 public sealed class SongItem
 {
-    public string FullPath { get; set; } = "";
-    public string FileNameWithoutExt => System.IO.Path.GetFileNameWithoutExtension(FullPath);
+  public string FullPath { get; set; } = "";
+  public string FileNameWithoutExt => System.IO.Path.GetFileNameWithoutExtension(FullPath);
 }
