@@ -30,10 +30,6 @@ public sealed class ItunesMetadataService : IApiMusicMetadataService
                 ArtworkUrl = first.ArtworkUrl100
             };
         }
-        catch (OperationCanceledException)
-        {
-            return new SongMetadataResult { Success = false, ErrorMessage = "Canceled" };
-        }
         catch (Exception ex)
         {
             return new SongMetadataResult { Success = false, ErrorMessage = ex.Message };
