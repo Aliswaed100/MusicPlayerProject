@@ -12,21 +12,24 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
     private const string DefaultCoverRelativePath = "Assets/default_cover.png";
 
     private readonly IApiMusicMetadataService _api;
+    private readonly IMetadataCache _cache;
     private readonly IAudioPlaybackService _audioPlayback;
     private readonly RelayCommand _playCommand;
     private CancellationTokenSource? _metadataCts;
+    private CancellationTokenSource? _selectionCts;
 
     public PlayerViewModel()
-        : this(new ItunesMetadataService(), new WpfAudioPlaybackService())
+        : this(new ItunesMetadataService(), new JsonMetadataCacheService(), new WpfAudioPlaybackService())
     {
         // Demo songs: replace with your real local files.
         Songs.Add(new SongItem { FullPath = @"C:\Music\Artist - Song.mp3" });
         Songs.Add(new SongItem { FullPath = @"C:\Music\AnotherSong.mp3" });
     }
 
-    public PlayerViewModel(IApiMusicMetadataService api, IAudioPlaybackService audioPlayback)
+    public PlayerViewModel(IApiMusicMetadataService api, IMetadataCache cache, IAudioPlaybackService audioPlayback)
     {
         _api = api;
+        _cache = cache;
         _audioPlayback = audioPlayback;
         _playCommand = new RelayCommand(_ => _ = PlaySelectedAsync(), _ => SelectedSong != null);
         CurrentCoverImagePath = ResolveImagePath(DefaultCoverRelativePath);
@@ -56,6 +59,8 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
             CurrentCoverImagePath = ResolveImagePath(ArtworkUrl);
             StatusMessage = "Ready";
             NotifyMetadataChanged();
+
+            _ = LoadCachedSelectionAsync(value);
         }
     }
 
@@ -91,6 +96,26 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         _metadataCts?.Cancel();
         _metadataCts?.Dispose();
         _metadataCts = new CancellationTokenSource();
+        var ct = _metadataCts.Token;
+
+        SongCacheEntry? cached;
+        try
+        {
+            cached = await _cache.GetAsync(song.FullPath, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (ct.IsCancellationRequested || SelectedSong?.FullPath != song.FullPath)
+            return;
+
+        if (cached != null)
+        {
+            ApplyCachedMetadata(song, cached, "Loaded from cache");
+            return;
+        }
 
         TrackName = song.FileNameWithoutExt;
         ArtistName = "";
@@ -100,10 +125,43 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         StatusMessage = "Loading metadata...";
         NotifyMetadataChanged();
 
-        await LoadMetadataAsync(song, _metadataCts.Token);
+        try
+        {
+            await LoadMetadataFromApiAsync(song, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            // Ignore cancellation when switching songs quickly.
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Cache error: {ex.Message}";
+            OnPropertyChanged(nameof(StatusMessage));
+        }
     }
 
-    private async Task LoadMetadataAsync(SongItem song, CancellationToken ct)
+    private async Task LoadCachedSelectionAsync(SongItem song)
+    {
+        _selectionCts?.Cancel();
+        _selectionCts?.Dispose();
+        _selectionCts = new CancellationTokenSource();
+        var ct = _selectionCts.Token;
+
+        try
+        {
+            var cached = await _cache.GetAsync(song.FullPath, ct);
+            if (cached == null || ct.IsCancellationRequested || SelectedSong?.FullPath != song.FullPath)
+                return;
+
+            ApplyCachedMetadata(song, cached, "Loaded from cache");
+        }
+        catch (OperationCanceledException)
+        {
+            // Ignore selection races.
+        }
+    }
+
+    private async Task LoadMetadataFromApiAsync(SongItem song, CancellationToken ct)
     {
         var query = SongQueryParser.BuildQueryFromFileName(song.FileNameWithoutExt);
         var result = await _api.SearchAsync(query, ct);
@@ -126,12 +184,32 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
             return;
         }
 
-        TrackName = result.TrackName ?? song.FileNameWithoutExt;
-        ArtistName = result.ArtistName ?? "";
-        AlbumName = result.AlbumName ?? "";
-        ArtworkUrl = string.IsNullOrWhiteSpace(result.ArtworkUrl) ? DefaultCoverRelativePath : result.ArtworkUrl;
+        var entry = new SongCacheEntry
+        {
+            FilePath = song.FullPath,
+            TrackName = result.TrackName ?? song.FileNameWithoutExt,
+            ArtistName = result.ArtistName ?? "",
+            AlbumName = result.AlbumName ?? "",
+            ApiArtworkUrl = string.IsNullOrWhiteSpace(result.ArtworkUrl) ? DefaultCoverRelativePath : result.ArtworkUrl,
+            UserImages = new List<string>()
+        };
+
+        await _cache.UpsertAsync(entry, ct);
+
+        if (ct.IsCancellationRequested || SelectedSong?.FullPath != song.FullPath)
+            return;
+
+        ApplyCachedMetadata(song, entry, "OK");
+    }
+
+    private void ApplyCachedMetadata(SongItem song, SongCacheEntry entry, string status)
+    {
+        TrackName = string.IsNullOrWhiteSpace(entry.TrackName) ? song.FileNameWithoutExt : entry.TrackName;
+        ArtistName = entry.ArtistName ?? "";
+        AlbumName = entry.AlbumName ?? "";
+        ArtworkUrl = string.IsNullOrWhiteSpace(entry.ApiArtworkUrl) ? DefaultCoverRelativePath : entry.ApiArtworkUrl;
         CurrentCoverImagePath = ResolveImagePath(ArtworkUrl);
-        StatusMessage = "OK";
+        StatusMessage = status;
         NotifyMetadataChanged();
     }
 
