@@ -5,7 +5,7 @@ namespace MusicPlayerWpf.Services;
 
 public sealed class ItunesMetadataService : IApiMusicMetadataService
 {
-    private readonly HttpClient _http = new();
+    private static readonly HttpClient Http = new();
 
     public async Task<SongMetadataResult> SearchAsync(string query, CancellationToken ct)
     {
@@ -15,7 +15,7 @@ public sealed class ItunesMetadataService : IApiMusicMetadataService
                 "https://itunes.apple.com/search?media=music&entity=song&limit=1&term=" +
                 Uri.EscapeDataString(query);
 
-            var resp = await _http.GetFromJsonAsync<ItunesSearchResponse>(url, ct);
+            var resp = await Http.GetFromJsonAsync<ItunesSearchResponse>(url, ct);
             var first = resp?.Results?.FirstOrDefault();
 
             if (first == null)

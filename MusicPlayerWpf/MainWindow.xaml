@@ -34,6 +34,11 @@
             <TextBlock Margin="0,8,0,0" Text="Status:" FontWeight="Bold"/>
             <TextBlock Text="{Binding StatusMessage}"/>
 
+            <TextBlock Margin="0,8,0,0" Text="Album Cover:" FontWeight="Bold"/>
+            <Border Width="180" Height="180" BorderBrush="LightGray" BorderThickness="1">
+                <Image Source="{Binding CurrentCoverImagePath}" Stretch="UniformToFill"/>
+            </Border>
+
             <TextBlock Margin="0,8,0,0" Text="ArtworkUrl:" FontWeight="Bold"/>
             <TextBlock Text="{Binding ArtworkUrl}" TextWrapping="Wrap"/>
         </StackPanel>

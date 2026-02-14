@@ -9,17 +9,27 @@ namespace MusicPlayerWpf.ViewModels;
 
 public sealed class PlayerViewModel : INotifyPropertyChanged
 {
-    private readonly IApiMusicMetadataService _api = new ItunesMetadataService();
-    private readonly ICommand _playCommand;
-    private CancellationTokenSource? _cts;
+    private const string DefaultCoverRelativePath = "Assets/default_cover.png";
+
+    private readonly IApiMusicMetadataService _api;
+    private readonly IAudioPlaybackService _audioPlayback;
+    private readonly RelayCommand _playCommand;
+    private CancellationTokenSource? _metadataCts;
 
     public PlayerViewModel()
+        : this(new ItunesMetadataService(), new WpfAudioPlaybackService())
     {
-        _playCommand = new RelayCommand(_ => _ = PlaySelectedAsync());
-
-        // مثال: غيّر المسارات لملفات mp3 عندك
+        // Demo songs: replace with your real local files.
         Songs.Add(new SongItem { FullPath = @"C:\Music\Artist - Song.mp3" });
         Songs.Add(new SongItem { FullPath = @"C:\Music\AnotherSong.mp3" });
+    }
+
+    public PlayerViewModel(IApiMusicMetadataService api, IAudioPlaybackService audioPlayback)
+    {
+        _api = api;
+        _audioPlayback = audioPlayback;
+        _playCommand = new RelayCommand(_ => _ = PlaySelectedAsync(), _ => SelectedSong != null);
+        CurrentCoverImagePath = ResolveImagePath(DefaultCoverRelativePath);
     }
 
     public ObservableCollection<SongItem> Songs { get; } = new();
@@ -32,51 +42,65 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         {
             _selectedSong = value;
             OnPropertyChanged();
+            _playCommand.RaiseCanExecuteChanged();
 
-            // Single click: show file name + path
-            if (value != null)
-            {
-                DisplayFileName = value.FileNameWithoutExt;
-                DisplayFilePath = value.FullPath;
-                OnPropertyChanged(nameof(DisplayFileName));
-                OnPropertyChanged(nameof(DisplayFilePath));
-            }
+            if (value == null)
+                return;
+
+            DisplayFileName = value.FileNameWithoutExt;
+            DisplayFilePath = value.FullPath;
+            TrackName = value.FileNameWithoutExt;
+            ArtistName = "";
+            AlbumName = "";
+            ArtworkUrl = DefaultCoverRelativePath;
+            CurrentCoverImagePath = ResolveImagePath(ArtworkUrl);
+            StatusMessage = "Ready";
+            NotifyMetadataChanged();
         }
     }
 
-    public string DisplayFileName { get; set; } = "";
-    public string DisplayFilePath { get; set; } = "";
-
-    public string TrackName { get; set; } = "";
-    public string ArtistName { get; set; } = "";
-    public string AlbumName { get; set; } = "";
-    public string ArtworkUrl { get; set; } = "Assets/default_cover.png";
-    public string StatusMessage { get; set; } = "";
+    public string DisplayFileName { get; private set; } = "";
+    public string DisplayFilePath { get; private set; } = "";
+    public string TrackName { get; private set; } = "";
+    public string ArtistName { get; private set; } = "";
+    public string AlbumName { get; private set; } = "";
+    public string ArtworkUrl { get; private set; } = DefaultCoverRelativePath;
+    public string CurrentCoverImagePath { get; private set; } = "";
+    public string StatusMessage { get; private set; } = "";
 
     public ICommand PlayCommand => _playCommand;
 
     public async Task PlaySelectedAsync()
     {
-        if (SelectedSong == null) return;
+        if (SelectedSong == null)
+            return;
 
-        // A) start audio NOW (بدّل هذه بدالة التشغيل الموجودة عندك)
-        StartPlayback(SelectedSong.FullPath);
+        var song = SelectedSong;
 
-        // B) cancel previous API call
-        _cts?.Cancel();
-        _cts?.Dispose();
-        _cts = new CancellationTokenSource();
+        try
+        {
+            _audioPlayback.Play(song.FullPath);
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Playback error: {ex.Message}";
+            OnPropertyChanged(nameof(StatusMessage));
+            return;
+        }
 
-        // C) show default while loading
-        TrackName = SelectedSong.FileNameWithoutExt;
+        _metadataCts?.Cancel();
+        _metadataCts?.Dispose();
+        _metadataCts = new CancellationTokenSource();
+
+        TrackName = song.FileNameWithoutExt;
         ArtistName = "";
         AlbumName = "";
-        ArtworkUrl = "Assets/default_cover.png";
-        StatusMessage = "Loading...";
+        ArtworkUrl = DefaultCoverRelativePath;
+        CurrentCoverImagePath = ResolveImagePath(ArtworkUrl);
+        StatusMessage = "Loading metadata...";
         NotifyMetadataChanged();
 
-        // D) fetch metadata async
-        await LoadMetadataAsync(SelectedSong, _cts.Token);
+        await LoadMetadataAsync(song, _metadataCts.Token);
     }
 
     private async Task LoadMetadataAsync(SongItem song, CancellationToken ct)
@@ -84,14 +108,19 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         var query = SongQueryParser.BuildQueryFromFileName(song.FileNameWithoutExt);
         var result = await _api.SearchAsync(query, ct);
 
-        if (ct.IsCancellationRequested) return;
+        if (ct.IsCancellationRequested)
+            return;
+
+        if (SelectedSong?.FullPath != song.FullPath)
+            return;
 
         if (!result.Success)
         {
-            // عند خطأ: اعرض اسم الملف + المسار
             TrackName = song.FileNameWithoutExt;
             DisplayFileName = song.FileNameWithoutExt;
             DisplayFilePath = song.FullPath;
+            ArtworkUrl = DefaultCoverRelativePath;
+            CurrentCoverImagePath = ResolveImagePath(ArtworkUrl);
             StatusMessage = $"API error: {result.ErrorMessage}";
             NotifyMetadataChanged();
             return;
@@ -100,9 +129,21 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         TrackName = result.TrackName ?? song.FileNameWithoutExt;
         ArtistName = result.ArtistName ?? "";
         AlbumName = result.AlbumName ?? "";
-        ArtworkUrl = result.ArtworkUrl ?? "Assets/default_cover.png";
+        ArtworkUrl = string.IsNullOrWhiteSpace(result.ArtworkUrl) ? DefaultCoverRelativePath : result.ArtworkUrl;
+        CurrentCoverImagePath = ResolveImagePath(ArtworkUrl);
         StatusMessage = "OK";
         NotifyMetadataChanged();
+    }
+
+    private static string ResolveImagePath(string value)
+    {
+        if (Uri.TryCreate(value, UriKind.Absolute, out var absoluteUri))
+            return absoluteUri.ToString();
+
+        if (Path.IsPathRooted(value))
+            return value;
+
+        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, value));
     }
 
     private void NotifyMetadataChanged()
@@ -111,18 +152,13 @@ public sealed class PlayerViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(ArtistName));
         OnPropertyChanged(nameof(AlbumName));
         OnPropertyChanged(nameof(ArtworkUrl));
+        OnPropertyChanged(nameof(CurrentCoverImagePath));
         OnPropertyChanged(nameof(StatusMessage));
         OnPropertyChanged(nameof(DisplayFileName));
         OnPropertyChanged(nameof(DisplayFilePath));
     }
 
-    private void StartPlayback(string path)
-    {
-        // مؤقت: خليها فاضية إذا مش جاهز.
-        // لاحقاً تربط MediaPlayer/NAudio حسب مشروعك.
-    }
-
     public event PropertyChangedEventHandler? PropertyChanged;
-    private void OnPropertyChanged([CallerMemberName] string? n = null)
-        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(n));
+    private void OnPropertyChanged([CallerMemberName] string? name = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }
